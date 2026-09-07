@@ -105,6 +105,9 @@ pub enum Error {
     /// Chrome cookie import failed. The message must not contain cookie values.
     #[error("cannot import Chrome cookies: {0}")]
     ChromeImport(String),
+    /// Operator declined to overwrite an existing cookies file.
+    #[error("auth cancelled; existing cookies were not overwritten")]
+    AuthCancelled,
 }
 
 /// Session cookie field required for GraphQL.

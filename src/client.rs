@@ -1,4 +1,7 @@
 //! Named X operations composed from HTTP + parsers.
+//!
+//! Write methods are wired to web mutations. They have not been live-regressed
+//! against a personal account.
 
 use serde_json::json;
 
@@ -161,24 +164,14 @@ impl XClient {
 
     /// Follow a user by handle.
     pub async fn follow(&self, name: &ScreenName) -> Result<User, Error> {
-        let user = self.user(name).await?;
-        let body = friendship_body(&user.id, name.as_str());
-        let _payload = self
-            .http
-            .form_post("/i/api/1.1/friendships/create.json", &body)
-            .await?;
-        Ok(user)
+        self.form_user("/i/api/1.1/friendships/create.json", name)
+            .await
     }
 
     /// Unfollow a user by handle.
     pub async fn unfollow(&self, name: &ScreenName) -> Result<User, Error> {
-        let user = self.user(name).await?;
-        let body = friendship_body(&user.id, name.as_str());
-        let _payload = self
-            .http
-            .form_post("/i/api/1.1/friendships/destroy.json", &body)
-            .await?;
-        Ok(user)
+        self.form_user("/i/api/1.1/friendships/destroy.json", name)
+            .await
     }
 
     /// Mentions timeline for the session.

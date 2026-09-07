@@ -2,6 +2,10 @@
 //!
 //! Core modules parse and validate values. HTTP and filesystem access live in
 //! [`auth`] and [`http`].
+//!
+//! The HTTP `WEB_BEARER` is the public x.com web-client token, not a user
+//! cookie. Session identity is only `auth_token` + `ct0`. GraphQL query IDs in
+//! `catalog.json` expire. Write operations are wired and not live-regressed.
 
 #![deny(missing_docs)]
 

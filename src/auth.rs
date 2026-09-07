@@ -37,6 +37,16 @@ impl CookiesFile {
             None => Self::default_path().ok_or(Error::MissingHome),
         }
     }
+
+    /// Whether the cookies file already exists on disk.
+    pub fn exists(&self) -> bool {
+        self.0.exists()
+    }
+}
+
+/// `y` / `yes` (any case) overwrites. Empty or `n` leaves the file unchanged.
+pub fn confirms_overwrite(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 /// Cookie pair required by X web GraphQL.
@@ -369,7 +379,7 @@ fn load_file(path: &Path) -> Result<SessionCookies, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthSource, CookiesFile, SessionCookies};
+    use super::{confirms_overwrite, AuthSource, CookiesFile, SessionCookies};
     use crate::error::{AuthField, Error};
     use std::fs;
 
@@ -377,6 +387,15 @@ mod tests {
     fn empty_token_is_missing_auth() {
         let err = SessionCookies::new(String::new(), "ct0".to_string());
         assert!(matches!(err, Err(Error::MissingAuth(AuthField::AuthToken))));
+    }
+
+    #[test]
+    fn overwrite_only_yes_or_y() {
+        assert!(confirms_overwrite("y"));
+        assert!(confirms_overwrite("YES"));
+        assert!(!confirms_overwrite("n"));
+        assert!(!confirms_overwrite(""));
+        assert!(!confirms_overwrite("maybe"));
     }
 
     #[test]

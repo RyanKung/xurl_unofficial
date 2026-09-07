@@ -61,19 +61,10 @@ pub fn tweet_from_create_payload(data: &Value) -> Result<Tweet, Error> {
 
 /// Find a tweet whose rest_id matches `post_id`.
 pub fn tweet_from_detail_payload(data: &Value, post_id: &str) -> Result<Tweet, Error> {
-    let mut found = Vec::new();
-    collect_tweets(data, &mut found);
-    found
+    collect(data, tweet_from_result, |tweet| tweet.id.as_str())
         .into_iter()
         .find(|tweet| tweet.id == post_id)
         .ok_or_else(|| Error::TweetNotFound(post_id.to_string()))
-}
-
-/// Collect tweets from a timeline or search payload, capped at `limit`.
-pub fn tweets_from_timeline_payload(data: &Value, limit: usize) -> Vec<Tweet> {
-    let mut found = Vec::new();
-    collect_tweets(data, &mut found);
-    found.into_iter().take(limit).collect()
 }
 
 /// Tweets plus the Bottom cursor (`next_token`).
@@ -86,9 +77,16 @@ pub fn timeline_page(data: &Value, limit: usize) -> (Vec<Tweet>, Option<String>)
 
 /// Users plus the Bottom cursor (`next_token`).
 pub fn user_page(data: &Value, limit: usize) -> (Vec<User>, Option<String>) {
-    let mut found = Vec::new();
-    collect_users(data, &mut found);
+    let found = collect(data, user_from_result, |user| user.id.as_str());
     (found.into_iter().take(limit).collect(), bottom_cursor(data))
+}
+
+/// Collect tweets from a timeline or search payload, capped at `limit`.
+pub fn tweets_from_timeline_payload(data: &Value, limit: usize) -> Vec<Tweet> {
+    collect(data, tweet_from_result, |tweet| tweet.id.as_str())
+        .into_iter()
+        .take(limit)
+        .collect()
 }
 
 fn bottom_cursor(value: &Value) -> Option<String> {
@@ -162,44 +160,28 @@ fn tweet_from_result(result: &Value) -> Option<Tweet> {
     })
 }
 
-fn collect_tweets(data: &Value, out: &mut Vec<Tweet>) {
-    if let Some(tweet) = tweet_from_result(data) {
-        if out.iter().all(|existing| existing.id != tweet.id) {
-            out.push(tweet);
-        }
-        return;
-    }
-    match data {
-        Value::Object(map) => {
-            for child in map.values() {
-                collect_tweets(child, out);
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                collect_tweets(child, out);
-            }
-        }
-        _ => {}
-    }
+fn collect<T>(value: &Value, pick: fn(&Value) -> Option<T>, id: fn(&T) -> &str) -> Vec<T> {
+    let mut out = Vec::new();
+    walk(value, &mut out, pick, id);
+    out
 }
 
-fn collect_users(data: &Value, out: &mut Vec<User>) {
-    if let Some(user) = user_from_result(data) {
-        if out.iter().all(|existing| existing.id != user.id) {
-            out.push(user);
+fn walk<T>(value: &Value, out: &mut Vec<T>, pick: fn(&Value) -> Option<T>, id: fn(&T) -> &str) {
+    if let Some(item) = pick(value) {
+        if out.iter().all(|existing| id(existing) != id(&item)) {
+            out.push(item);
         }
         return;
     }
-    match data {
+    match value {
         Value::Object(map) => {
             for child in map.values() {
-                collect_users(child, out);
+                walk(child, out, pick, id);
             }
         }
         Value::Array(items) => {
             for child in items {
-                collect_users(child, out);
+                walk(child, out, pick, id);
             }
         }
         _ => {}
@@ -219,31 +201,10 @@ pub fn media_from_upload(data: &Value) -> Result<Media, Error> {
 
 /// Collect DM entries from inbox_initial_state.
 pub fn dms_from_inbox(data: &Value, limit: usize) -> Vec<DirectMessage> {
-    let mut found = Vec::new();
-    collect_dms(data, &mut found);
-    found.into_iter().take(limit).collect()
-}
-
-fn collect_dms(data: &Value, out: &mut Vec<DirectMessage>) {
-    if let Some(message) = dm_from_value(data) {
-        if out.iter().all(|existing| existing.id != message.id) {
-            out.push(message);
-        }
-        return;
-    }
-    match data {
-        Value::Object(map) => {
-            for child in map.values() {
-                collect_dms(child, out);
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                collect_dms(child, out);
-            }
-        }
-        _ => {}
-    }
+    collect(data, dm_from_value, |message| message.id.as_str())
+        .into_iter()
+        .take(limit)
+        .collect()
 }
 
 fn dm_from_value(value: &Value) -> Option<DirectMessage> {

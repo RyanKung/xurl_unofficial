@@ -1,4 +1,7 @@
 //! Bundled GraphQL operation catalog.
+//!
+//! Query IDs rotate when X ships a new web bundle. A 404 on a named operation
+//! means `catalog.json` is stale, not that the CLI command is missing.
 
 use std::collections::BTreeMap;
 

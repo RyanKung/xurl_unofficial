@@ -11,6 +11,8 @@ use crate::error::{body_preview, Error};
 const ORIGIN: &str = "https://x.com";
 const API_ORIGIN: &str = "https://api.x.com";
 const UPLOAD_ORIGIN: &str = "https://upload.x.com";
+/// Public x.com web-client Bearer. This is not a user credential.
+/// Session identity is only `auth_token` + `ct0` cookies.
 const WEB_BEARER: &str = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs=1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 
 /// Cookie-authenticated HTTP client.

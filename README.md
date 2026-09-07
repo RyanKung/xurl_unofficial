@@ -56,7 +56,7 @@ xurl auth browser
 xurl auth status
 ```
 
-`xurl auth` prompts for `auth_token`, then `ct0`, and writes `~/.xurl-unofficial/cookies.toml` (mode 0600). Auth commands print a short English status line, not JSON. Values are never printed.
+`xurl auth` prompts for `auth_token`, then `ct0`, and writes `~/.xurl-unofficial/cookies.toml` (mode 0600). If that file already exists, it asks `Overwrite? [y/N]`. `N` or empty leaves the file unchanged. Auth commands print a short English status line, not JSON. Values are never printed.
 
 `xurl auth browser` opens https://x.com, waits for Enter, then reads `auth_token` and `ct0` from Chrome. If import fails (Chrome lock, Keychain deny, app-bound encryption), it falls back to the same prompts.
 
@@ -70,4 +70,8 @@ Env aliases (same as polyoracle):
 
 ## Model incompleteness
 
-Write actions (`post`, `reply`, `quote`, `delete`, `like`, `repost`, `follow`, `bookmark`, `block`, `mute`, `dm`, `media upload`, …) use undocumented web mutations. They can 404 when X rotates query IDs.
+- **WEB_BEARER** in `src/http.rs` is the public x.com web-client token, not a user cookie. Identity is only `auth_token` + `ct0`. Do not store it in `~/.xurl`.
+- **query IDs expire.** `catalog.json` hashes rotate when X ships a new web bundle. GraphQL 404 on a named operation means the catalog is stale.
+- **Writes are wired only.** `post` / `reply` / `quote` / `delete` / `like` / `repost` / `follow` / `bookmark` / `block` / `mute` / `dm` / `media upload` have not been live-regressed against a personal account.
+
+Write actions use undocumented web mutations. They can 404 when X rotates query IDs.

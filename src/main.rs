@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use serde_json::json;
-use xurl_unofficial::auth::AuthSaved;
+use xurl_unofficial::auth::{confirms_overwrite, AuthSaved};
 use xurl_unofficial::browser;
 use xurl_unofficial::error::{AuthField, Error};
 use xurl_unofficial::{
@@ -356,8 +356,27 @@ fn persist(
     origin: AuthOrigin,
 ) -> Result<(), Error> {
     let file = CookiesFile::or_default(dest)?;
+    confirm_overwrite(&file)?;
     session.save(&file)?;
     print_line(&AuthSaved::new(&file, origin).to_string())
+}
+
+fn confirm_overwrite(file: &CookiesFile) -> Result<(), Error> {
+    if !file.exists() {
+        return Ok(());
+    }
+    writeln!(
+        io::stderr(),
+        "Cookies already exist at {}. Overwrite? [y/N]",
+        file.as_path().display()
+    )
+    .map_err(|source| Error::Io { path: None, source })?;
+    let answer = prompt_line("overwrite")?;
+    if confirms_overwrite(&answer) {
+        Ok(())
+    } else {
+        Err(Error::AuthCancelled)
+    }
 }
 
 fn prompt_session() -> Result<SessionCookies, Error> {
