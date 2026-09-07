@@ -6,8 +6,8 @@ author: Hermes Agent
 license: MIT
 metadata:
   hermes:
-    tags: [x, twitter, graphql, cookies, rust, impersonation]
-    related_skills: [rustacean, github-pr-workflow]
+    tags: [x, twitter, graphql, cookies, rust, impersonation, openclaw, codex, claude-code, cursor]
+    related_skills: [rustacean, codex, claude-code, github-pr-workflow]
 ---
 
 # xurl-unofficial Web GraphQL Maintenance
@@ -117,6 +117,87 @@ When adding a GraphQL operation:
 5. Keep runtime refresh in memory only; do not write to `catalog.json` during command execution.
 
 If a live command 404s after refresh, treat it as a catalog/method/feature mismatch, not automatically as auth failure. X can change the HTTP method as well as `queryId`.
+
+## Agent Runtime Support
+
+This `SKILL.md` is the project instruction file for OpenClaw-style agents, Codex, Claude Code, Cursor, and Hermes. Each runtime should read it before touching the repository. If the runtime supports a project memory file, either point it at this file or create a tiny bridge file that says "read `SKILL.md` first".
+
+### Shared Prompt Contract
+
+Use this contract for any agent launched inside the repo:
+
+```text
+You are maintaining xurl-unofficial, an unofficial Rust CLI whose binary is xurl.
+Read SKILL.md first and obey its safety rules. Do not print cookies, Bearer values,
+or browser cookie contents. Do not run write-side X actions unless explicitly asked
+with exact target/content. Keep examples to public placeholders such as alice or X.
+Before changing code, inspect the relevant files. After changes, run cargo fmt --check,
+the clippy deny gate from SKILL.md, and cargo test --all-targets --all-features.
+```
+
+### OpenClaw
+
+OpenClaw-style runners should treat repository `SKILL.md` as the durable project brief. If the runner supports custom context files, include this file verbatim. If it supports command presets, expose these read-only defaults:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::todo -D clippy::unimplemented -D clippy::indexing_slicing
+cargo test --all-targets --all-features
+cargo run -- auth status
+cargo run -- user x
+cargo run -- search "from:X" -n 1
+```
+
+OpenClaw should not auto-run write commands, should not read or display cookie files, and should ask before push/force-push.
+
+### Codex CLI
+
+For Codex, feed this file as prompt context or tell Codex to read it first:
+
+```bash
+codex exec -C /path/to/xurl-unofficial --full-auto --output-last-message /tmp/xurl_codex_result.md '
+Read SKILL.md first. Then perform the requested xurl-unofficial maintenance task.
+Do not print secrets. Do not run X write actions. Run the SKILL.md verification gate.
+'
+```
+
+For review-only work, use a read-only sandbox and ask for findings only:
+
+```bash
+codex exec -C /path/to/xurl-unofficial --sandbox read-only --output-last-message /tmp/xurl_codex_review.md '
+Read SKILL.md, then review the current diff for correctness, safety, and secret leaks.
+'
+```
+
+The supervising agent must independently verify Codex results with `git status --short` and the Rust gates before reporting success.
+
+### Claude Code
+
+Claude Code auto-loads `CLAUDE.md`, not `SKILL.md`. To support it, create a small git-tracked `CLAUDE.md` bridge only if the user wants Claude-specific project memory:
+
+```markdown
+# xurl-unofficial
+
+Read `SKILL.md` first. Its safety rules and verification checklist are authoritative for this repository.
+```
+
+Without a bridge, launch Claude with an explicit instruction:
+
+```bash
+claude -p 'Read SKILL.md first, then perform the requested maintenance task. Do not print secrets or run X write actions. Run the verification gate.' --max-turns 10
+```
+
+Use print mode for one-shot changes. If interactive Claude Code is used, monitor it through tmux and stop before any real write-side X action.
+
+### Cursor
+
+For Cursor, keep this file open or referenced from Cursor Rules. A minimal `.cursor/rules/xurl-unofficial.md` bridge can be:
+
+```markdown
+Read repository `SKILL.md` before modifying this project. Obey its secret-handling, X write-action, queryId, transaction-id, and Rust verification rules.
+```
+
+Cursor agents should run the same Rust gate after edits and should not rely on IDE diagnostics alone. Any generated examples must use placeholder handles.
 
 ## Verification Commands
 
