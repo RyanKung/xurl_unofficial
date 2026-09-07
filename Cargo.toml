@@ -18,12 +18,16 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive", "env"] }
 open = "5.4.3"
 pookie = "0.1.0"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 toml = "0.8"
+wreq = { version = "6.0.0-rc.31", default-features = false, features = ["json", "form", "multipart", "query", "webpki-roots", "tokio-rt"] }
+wreq-util = "3.0.0-rc.14"
+x-client-transaction = "0.1.0"
 
 [lints.clippy]
 unwrap_used = "deny"

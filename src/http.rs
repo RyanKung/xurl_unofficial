@@ -1,10 +1,19 @@
-//! HTTP adapter for X web GraphQL and REST verify_credentials.
+//! HTTP adapter for X web GraphQL.
+//!
+//! Uses Chrome TLS/HTTP2 emulation (`wreq`). GraphQL 404 refreshes query IDs
+//! from live JS. `x-client-transaction-id` is generated from the live homepage
+//! when the current algorithm still parses.
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
-use reqwest::Client;
+use std::sync::Mutex;
+
 use serde_json::{json, Value};
+use wreq::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
+use wreq::Client;
+use wreq_util::Emulation;
+use x_client_transaction::ClientTransaction;
 
 use crate::auth::SessionCookies;
+use crate::bundle;
 use crate::catalog::{Catalog, GraphQlMethod, Operation};
 use crate::error::{body_preview, Error};
 
@@ -15,45 +24,66 @@ const UPLOAD_ORIGIN: &str = "https://upload.x.com";
 /// Session identity is only `auth_token` + `ct0` cookies.
 const WEB_BEARER: &str = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs=1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 
+enum TidState {
+    Untried,
+    Ready(ClientTransaction),
+    Failed,
+}
+
 /// Cookie-authenticated HTTP client.
 pub struct Http {
     client: Client,
-    catalog: Catalog,
+    catalog: Mutex<Catalog>,
     headers: HeaderMap,
+    tid: Mutex<TidState>,
 }
 
 impl Http {
-    /// Build a client from session cookies and the bundled catalog.
+    /// Build a Chrome-emulated client from session cookies and the bundled catalog.
     pub fn new(session: SessionCookies) -> Result<Self, Error> {
         Ok(Self {
-            client: Client::builder().build()?,
-            catalog: Catalog::bundled()?,
+            client: Client::builder().emulation(Emulation::Chrome149).build()?,
+            catalog: Mutex::new(Catalog::bundled()?),
             headers: session_headers(&session)?,
+            tid: Mutex::new(TidState::Untried),
         })
     }
 
-    /// Execute a named GraphQL operation.
+    /// Execute a named GraphQL operation, refreshing query IDs once on 404.
     pub async fn graphql(&self, name: &'static str, variables: Value) -> Result<Value, Error> {
-        let op = self.catalog.get(name)?;
-        self.execute(op, variables).await
+        let op = self.operation(name)?;
+        match self.execute(&op, variables.clone()).await {
+            Err(Error::GraphQlStatus { status: 404, .. }) => {
+                self.refresh_query_ids().await?;
+                let op = self.operation(name)?;
+                self.execute(&op, variables).await
+            }
+            other => other,
+        }
     }
 
     /// GET `https://api.x.com/1.1/account/verify_credentials.json`.
     pub async fn verify_credentials(&self) -> Result<Value, Error> {
-        self.get_json(&format!("{API_ORIGIN}/1.1/account/verify_credentials.json"))
-            .await
+        self.get_json(
+            &format!("{API_ORIGIN}/1.1/account/verify_credentials.json"),
+            "/1.1/account/verify_credentials.json",
+        )
+        .await
     }
 
     /// GET `https://api.x.com/1.1/account/settings.json`.
     pub async fn account_settings(&self) -> Result<Value, Error> {
-        self.get_json(&format!("{API_ORIGIN}/1.1/account/settings.json"))
-            .await
+        self.get_json(
+            &format!("{API_ORIGIN}/1.1/account/settings.json"),
+            "/1.1/account/settings.json",
+        )
+        .await
     }
 
     /// POST `application/x-www-form-urlencoded` to an x.com path.
     pub async fn form_post(&self, path: &'static str, body: &str) -> Result<Value, Error> {
         let url = format!("{ORIGIN}{path}");
-        let mut headers = self.headers.clone();
+        let mut headers = self.headers_for("POST", path).await?;
         headers.insert(
             HeaderName::from_static("content-type"),
             HeaderValue::from_static("application/x-www-form-urlencoded"),
@@ -70,17 +100,17 @@ impl Http {
 
     /// GET an x.com API path.
     pub async fn get_path(&self, path: &'static str) -> Result<Value, Error> {
-        self.get_json(&format!("{ORIGIN}{path}")).await
+        self.get_json(&format!("{ORIGIN}{path}"), path).await
     }
 
-    /// POST urlencoded fields, letting reqwest encode values.
+    /// POST urlencoded fields, letting the client encode values.
     pub async fn form_pairs(
         &self,
         path: &'static str,
         pairs: &[(&str, String)],
     ) -> Result<Value, Error> {
         let url = format!("{ORIGIN}{path}");
-        let mut headers = self.headers.clone();
+        let mut headers = self.headers_for("POST", path).await?;
         headers.remove(CONTENT_TYPE);
         let response = self
             .client
@@ -99,8 +129,9 @@ impl Http {
         media_type: &str,
         media_category: &str,
     ) -> Result<Value, Error> {
-        let url = format!("{UPLOAD_ORIGIN}/i/media/upload.json");
-        let mut headers = self.headers.clone();
+        let path = "/i/media/upload.json";
+        let url = format!("{UPLOAD_ORIGIN}{path}");
+        let mut headers = self.headers_for("POST", path).await?;
         headers.remove(CONTENT_TYPE);
         let total = total_bytes.to_string();
         let response = self
@@ -125,14 +156,15 @@ impl Http {
         segment_index: u32,
         bytes: Vec<u8>,
     ) -> Result<(), Error> {
-        let url = format!("{UPLOAD_ORIGIN}/i/media/upload.json");
-        let mut headers = self.headers.clone();
+        let path = "/i/media/upload.json";
+        let url = format!("{UPLOAD_ORIGIN}{path}");
+        let mut headers = self.headers_for("POST", path).await?;
         headers.remove(CONTENT_TYPE);
-        let part = reqwest::multipart::Part::bytes(bytes)
+        let part = wreq::multipart::Part::bytes(bytes)
             .file_name("blob")
             .mime_str("application/octet-stream")
             .map_err(|_| Error::InvalidMedia)?;
-        let form = reqwest::multipart::Form::new()
+        let form = wreq::multipart::Form::new()
             .text("command", "APPEND")
             .text("media_id", media_id.to_string())
             .text("segment_index", segment_index.to_string())
@@ -150,8 +182,9 @@ impl Http {
 
     /// FINALIZE a media upload.
     pub async fn media_finalize(&self, media_id: &str) -> Result<Value, Error> {
-        let url = format!("{UPLOAD_ORIGIN}/i/media/upload.json");
-        let mut headers = self.headers.clone();
+        let path = "/i/media/upload.json";
+        let url = format!("{UPLOAD_ORIGIN}{path}");
+        let mut headers = self.headers_for("POST", path).await?;
         headers.remove(CONTENT_TYPE);
         let response = self
             .client
@@ -165,8 +198,9 @@ impl Http {
 
     /// STATUS a media upload.
     pub async fn media_status(&self, media_id: &str) -> Result<Value, Error> {
-        let url = format!("{UPLOAD_ORIGIN}/i/media/upload.json");
-        let mut headers = self.headers.clone();
+        let path = "/i/media/upload.json";
+        let url = format!("{UPLOAD_ORIGIN}{path}");
+        let mut headers = self.headers_for("GET", path).await?;
         headers.remove(CONTENT_TYPE);
         let response = self
             .client
@@ -178,18 +212,20 @@ impl Http {
         read_json(response).await
     }
 
-    async fn get_json(&self, url: &str) -> Result<Value, Error> {
-        let response = self
-            .client
-            .get(url)
-            .headers(self.headers.clone())
-            .send()
-            .await?;
+    async fn get_json(&self, url: &str, path: &str) -> Result<Value, Error> {
+        let headers = self.headers_for("GET", path).await?;
+        let response = self.client.get(url).headers(headers).send().await?;
         read_json(response).await
     }
 
     async fn execute(&self, op: &Operation, variables: Value) -> Result<Value, Error> {
-        let url = format!("{ORIGIN}/i/api/graphql/{}/{}", op.query_id, op.name);
+        let path = format!("/i/api/graphql/{}/{}", op.query_id, op.name);
+        let url = format!("{ORIGIN}{path}");
+        let method = match op.method {
+            GraphQlMethod::Get => "GET",
+            GraphQlMethod::Post => "POST",
+        };
+        let headers = self.headers_for(method, &path).await?;
         let request = match op.method {
             GraphQlMethod::Get => {
                 let params = [
@@ -207,9 +243,85 @@ impl Http {
                 self.client.post(url).json(&body)
             }
         };
-        let response = request.headers(self.headers.clone()).send().await?;
+        let response = request.headers(headers).send().await?;
         read_json(response).await
     }
+
+    fn operation(&self, name: &'static str) -> Result<Operation, Error> {
+        let catalog = self
+            .catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        catalog.get(name).cloned()
+    }
+
+    async fn refresh_query_ids(&self) -> Result<(), Error> {
+        let ids = bundle::scrape_query_ids(&self.client, &self.headers).await?;
+        let mut catalog = self
+            .catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changed = catalog.apply_query_ids(&ids);
+        if changed == 0 {
+            return Err(Error::BundleRefresh);
+        }
+        Ok(())
+    }
+
+    async fn headers_for(&self, method: &str, path: &str) -> Result<HeaderMap, Error> {
+        let mut headers = self.headers.clone();
+        if let Some(tid) = self.transaction_id(method, path).await? {
+            insert_owned(&mut headers, "x-client-transaction-id", &tid)?;
+        }
+        Ok(headers)
+    }
+
+    async fn transaction_id(&self, method: &str, path: &str) -> Result<Option<String>, Error> {
+        {
+            let state = self
+                .tid
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &*state {
+                TidState::Failed => return Ok(None),
+                TidState::Ready(tx) => {
+                    return tx
+                        .generate_transaction_id(method, path)
+                        .map(Some)
+                        .map_err(|err| Error::Transaction(err.to_string()));
+                }
+                TidState::Untried => {}
+            }
+        }
+        let init = tokio::task::spawn_blocking(init_tid).await;
+        let mut state = self
+            .tid
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match init {
+            Ok(Ok(tx)) => {
+                let header = tx
+                    .generate_transaction_id(method, path)
+                    .map_err(|err| Error::Transaction(err.to_string()))?;
+                *state = TidState::Ready(tx);
+                Ok(Some(header))
+            }
+            Ok(Err(_)) | Err(_) => {
+                *state = TidState::Failed;
+                Ok(None)
+            }
+        }
+    }
+}
+
+fn init_tid() -> Result<ClientTransaction, Error> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+        )
+        .build()
+        .map_err(|err| Error::Transaction(err.to_string()))?;
+    ClientTransaction::new(&client).map_err(|err| Error::Transaction(err.to_string()))
 }
 
 fn session_headers(session: &SessionCookies) -> Result<HeaderMap, Error> {
@@ -220,11 +332,6 @@ fn session_headers(session: &SessionCookies) -> Result<HeaderMap, Error> {
     insert_owned(&mut headers, "x-csrf-token", session.ct0())?;
     insert_static(&mut headers, "origin", ORIGIN)?;
     insert_static(&mut headers, "referer", "https://x.com/")?;
-    insert_static(
-        &mut headers,
-        "user-agent",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    )?;
     insert_static(&mut headers, "x-twitter-auth-type", "OAuth2Session")?;
     insert_static(&mut headers, "x-twitter-active-user", "yes")?;
     insert_static(&mut headers, "x-twitter-client-language", "en")?;
@@ -250,7 +357,7 @@ fn insert_owned(headers: &mut HeaderMap, name: &'static str, value: &str) -> Res
     Ok(())
 }
 
-async fn read_json(response: reqwest::Response) -> Result<Value, Error> {
+async fn read_json(response: wreq::Response) -> Result<Value, Error> {
     let status = response.status();
     let body = response.text().await?;
     if !status.is_success() {
@@ -262,7 +369,7 @@ async fn read_json(response: reqwest::Response) -> Result<Value, Error> {
     Ok(serde_json::from_str(&body)?)
 }
 
-async fn read_json_allow_empty(response: reqwest::Response) -> Result<Value, Error> {
+async fn read_json_allow_empty(response: wreq::Response) -> Result<Value, Error> {
     let status = response.status();
     let body = response.text().await?;
     if !status.is_success() {

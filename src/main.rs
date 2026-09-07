@@ -330,10 +330,12 @@ fn save_from_prompt(dest: Option<CookiesFile>) -> Result<(), Error> {
 
 fn save_from_browser(dest: Option<CookiesFile>) -> Result<(), Error> {
     require_tty()?;
+    let file = CookiesFile::or_default(dest)?;
+    confirm_overwrite(&file)?;
     open::that("https://x.com").map_err(|err| Error::BrowserOpen(err.to_string()))?;
     writeln!(
         io::stderr(),
-        "Log in to X in Chrome if needed, then press Enter to import cookies."
+        "Log in to X in Chrome if needed, then press Enter to import cookies.\nIf macOS asks for the login keychain, enter it once and choose Always Allow."
     )
     .map_err(|source| Error::Io { path: None, source })?;
     let mut line = String::new();
@@ -341,11 +343,12 @@ fn save_from_browser(dest: Option<CookiesFile>) -> Result<(), Error> {
         .read_line(&mut line)
         .map_err(|source| Error::Io { path: None, source })?;
     match browser::session_from_chrome() {
-        Ok(session) => persist(session, dest, AuthOrigin::Chrome),
+        Ok(session) => write_session(session, &file, AuthOrigin::Chrome),
         Err(err) => {
             writeln!(io::stderr(), "{err}\nEnter auth_token and ct0 manually.")
                 .map_err(|source| Error::Io { path: None, source })?;
-            save_from_prompt(dest)
+            let session = prompt_session()?;
+            write_session(session, &file, AuthOrigin::Prompt)
         }
     }
 }
@@ -357,8 +360,16 @@ fn persist(
 ) -> Result<(), Error> {
     let file = CookiesFile::or_default(dest)?;
     confirm_overwrite(&file)?;
-    session.save(&file)?;
-    print_line(&AuthSaved::new(&file, origin).to_string())
+    write_session(session, &file, origin)
+}
+
+fn write_session(
+    session: SessionCookies,
+    file: &CookiesFile,
+    origin: AuthOrigin,
+) -> Result<(), Error> {
+    session.save(file)?;
+    print_line(&AuthSaved::new(file, origin).to_string())
 }
 
 fn confirm_overwrite(file: &CookiesFile) -> Result<(), Error> {

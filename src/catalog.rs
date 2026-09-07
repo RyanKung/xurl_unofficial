@@ -73,10 +73,26 @@ impl Catalog {
     pub fn get(&self, name: &'static str) -> Result<&Operation, Error> {
         self.ops.get(name).ok_or(Error::UnknownOperation(name))
     }
+
+    /// Replace query IDs for operations present in `ids`. Returns how many changed.
+    pub fn apply_query_ids(&mut self, ids: &BTreeMap<String, String>) -> usize {
+        let mut changed = 0;
+        for (name, op) in &mut self.ops {
+            if let Some(query_id) = ids.get(name) {
+                if op.query_id != *query_id {
+                    op.query_id = query_id.clone();
+                    changed += 1;
+                }
+            }
+        }
+        changed
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::Catalog;
 
     #[test]
@@ -102,6 +118,27 @@ mod tests {
             assert!(catalog.get("Likes").is_ok());
             assert!(catalog.get("TweetDetail").is_ok());
             assert!(catalog.get("DeleteTweet").is_ok());
+        }
+    }
+
+    #[test]
+    fn apply_query_ids_replaces_known_ops_only() {
+        let catalog = Catalog::bundled();
+        assert!(catalog.is_ok());
+        let Ok(mut catalog) = catalog else {
+            return;
+        };
+        let mut ids = BTreeMap::new();
+        ids.insert(
+            "UserByScreenName".to_string(),
+            "NewQueryIdAAAAAAAAAAAA".to_string(),
+        );
+        ids.insert("NotInCatalog".to_string(), "ignored".to_string());
+        assert_eq!(catalog.apply_query_ids(&ids), 1);
+        let found = catalog.get("UserByScreenName");
+        assert!(found.is_ok());
+        if let Ok(op) = found {
+            assert_eq!(op.query_id.as_str(), "NewQueryIdAAAAAAAAAAAA");
         }
     }
 }

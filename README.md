@@ -56,9 +56,9 @@ xurl auth browser
 xurl auth status
 ```
 
-`xurl auth` prompts for `auth_token`, then `ct0`, and writes `~/.xurl-unofficial/cookies.toml` (mode 0600). If that file already exists, it asks `Overwrite? [y/N]`. `N` or empty leaves the file unchanged. Auth commands print a short English status line, not JSON. Values are never printed.
+`xurl auth` prompts for `auth_token`, then `ct0`, and writes `~/.xurl-unofficial/cookies.toml` (mode 0600). If that file already exists, it asks `Overwrite? [y/N]` before writing (and before Keychain, for `auth browser`). `N` or empty leaves the file unchanged. Auth commands print a short English status line, not JSON. Values are never printed.
 
-`xurl auth browser` opens https://x.com, waits for Enter, then reads `auth_token` and `ct0` from Chrome. If import fails (Chrome lock, Keychain deny, app-bound encryption), it falls back to the same prompts.
+`xurl auth browser` opens https://x.com, waits for Enter, then reads `auth_token` and `ct0` from Chrome. If that cookies file already exists, it asks `Overwrite? [y/N]` first. If macOS shows a Keychain dialog, choose **Always Allow**. If import fails, it falls back to the same prompts.
 
 Do not paste cookies into chat.
 
@@ -71,7 +71,9 @@ Env aliases (same as polyoracle):
 ## Model incompleteness
 
 - **WEB_BEARER** in `src/http.rs` is the public x.com web-client token, not a user cookie. Identity is only `auth_token` + `ct0`. Do not store it in `~/.xurl`.
-- **query IDs expire.** `catalog.json` hashes rotate when X ships a new web bundle. GraphQL 404 on a named operation means the catalog is stale.
+- **Chrome impersonate.** Requests use `wreq` Chrome TLS/HTTP2 emulation, not rustls `reqwest`.
+- **query IDs expire** when X ships a new web bundle. GraphQL 404 on a named operation triggers a live JS scrape and one retry. `catalog.json` is only the bundled fallback.
+- **`x-client-transaction-id`** is generated from the live x.com homepage + `ondemand.s` when that parser still matches. If X changes the animation/JS contract, the header is skipped rather than failing every call.
 - **Writes are wired only.** `post` / `reply` / `quote` / `delete` / `like` / `repost` / `follow` / `bookmark` / `block` / `mute` / `dm` / `media upload` have not been live-regressed against a personal account.
 
 Write actions use undocumented web mutations. They can 404 when X rotates query IDs.

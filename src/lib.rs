@@ -5,12 +5,14 @@
 //!
 //! The HTTP `WEB_BEARER` is the public x.com web-client token, not a user
 //! cookie. Session identity is only `auth_token` + `ct0`. GraphQL query IDs in
-//! `catalog.json` expire. Write operations are wired and not live-regressed.
+//! `catalog.json` expire and are refreshed from live JS on 404. Write operations
+//! are wired and not live-regressed. Requests impersonate Chrome TLS/HTTP2.
 
 #![deny(missing_docs)]
 
 pub mod auth;
 pub mod browser;
+pub mod bundle;
 pub mod catalog;
 pub mod client;
 pub mod error;

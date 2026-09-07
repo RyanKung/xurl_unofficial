@@ -45,7 +45,13 @@ pub enum Error {
     UnknownOperation(&'static str),
     /// HTTP transport failure.
     #[error("http transport: {0}")]
-    Transport(#[from] reqwest::Error),
+    Transport(#[from] wreq::Error),
+    /// `x-client-transaction-id` could not be generated from the live homepage.
+    #[error("client transaction: {0}")]
+    Transaction(String),
+    /// Live JS bundles did not yield GraphQL query IDs.
+    #[error("could not refresh graphql query ids")]
+    BundleRefresh,
     /// HTTP header value could not be encoded.
     #[error("invalid http header")]
     InvalidHeader,
