@@ -1,5 +1,29 @@
 /target
+
+# env and dumps
 .env
 .env.*
+!.env.example
+
+# session cookies (this crate and official xurl, if copied into the repo)
 cookies.toml
 *.cookies.toml
+cookies.json
+.xurl
+.xurl-unofficial/
+
+# keys / certs
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+id_dsa
+*.ppk
+
+# generic credential files
+credentials.json
+secrets.json
+secrets.toml
+*.secret
