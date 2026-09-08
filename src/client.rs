@@ -341,38 +341,10 @@ impl XClient {
         quote_of: Option<&PostId>,
         media: &[MediaId],
     ) -> Result<Tweet, Error> {
-        let entities: Vec<serde_json::Value> = media
-            .iter()
-            .map(|id| json!({ "media_id": id.as_str(), "tagged_users": [] }))
-            .collect();
-        let mut variables = json!({
-            "tweet_text": text.as_str(),
-            "dark_request": false,
-            "media": {
-                "media_entities": entities,
-                "possibly_sensitive": false
-            },
-            "semantic_annotation_ids": []
-        });
-        if let Some(object) = variables.as_object_mut() {
-            if let Some(post_id) = reply_to {
-                object.insert(
-                    "reply".to_string(),
-                    json!({
-                        "in_reply_to_tweet_id": post_id.as_str(),
-                        "exclude_reply_user_ids": []
-                    }),
-                );
-            }
-            if let Some(post_id) = quote_of {
-                object.insert(
-                    "attachment_url".to_string(),
-                    json!(format!("https://x.com/i/web/status/{}", post_id.as_str())),
-                );
-            }
-        }
-        let payload = self.http.graphql("CreateTweet", variables).await?;
-        tweet_from_create_payload(&payload)
+        let variables = create_variables_for(text, reply_to, quote_of, media);
+        let operation = create_operation_for(text);
+        let payload = self.http.graphql(operation, variables).await?;
+        tweet_from_create_payload(&payload, text.as_str())
     }
 
     async fn target_user_id(&self, of: Option<&ScreenName>) -> Result<String, Error> {
@@ -424,6 +396,53 @@ impl XClient {
     }
 }
 
+fn create_operation_for(text: &PostText) -> &'static str {
+    if text.requires_note_tweet() {
+        "CreateNoteTweet"
+    } else {
+        "CreateTweet"
+    }
+}
+
+fn create_variables_for(
+    text: &PostText,
+    reply_to: Option<&PostId>,
+    quote_of: Option<&PostId>,
+    media: &[MediaId],
+) -> serde_json::Value {
+    let entities: Vec<serde_json::Value> = media
+        .iter()
+        .map(|id| json!({ "media_id": id.as_str(), "tagged_users": [] }))
+        .collect();
+    let mut variables = json!({
+        "tweet_text": text.as_str(),
+        "dark_request": false,
+        "media": {
+            "media_entities": entities,
+            "possibly_sensitive": false
+        },
+        "semantic_annotation_ids": []
+    });
+    if let Some(object) = variables.as_object_mut() {
+        if let Some(post_id) = reply_to {
+            object.insert(
+                "reply".to_string(),
+                json!({
+                    "in_reply_to_tweet_id": post_id.as_str(),
+                    "exclude_reply_user_ids": []
+                }),
+            );
+        }
+        if let Some(post_id) = quote_of {
+            object.insert(
+                "attachment_url".to_string(),
+                json!(post_id.attachment_url()),
+            );
+        }
+    }
+    variables
+}
+
 fn friendship_body(user_id: &str, screen_name: &str) -> String {
     format!("user_id={user_id}&screen_name={screen_name}")
 }
@@ -432,6 +451,56 @@ fn insert_cursor(variables: &mut serde_json::Value, cursor: Option<&str>) {
     if let Some(token) = cursor {
         if let Some(object) = variables.as_object_mut() {
             object.insert("cursor".to_string(), json!(token));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{create_operation_for, create_variables_for};
+    use crate::types::{PostId, PostText};
+
+    #[test]
+    fn short_text_uses_create_tweet() {
+        let text = PostText::parse("short post");
+        assert!(text.is_ok());
+        if let Ok(text) = text {
+            assert_eq!(create_operation_for(&text), "CreateTweet");
+        }
+    }
+
+    #[test]
+    fn long_text_uses_create_note_tweet() {
+        let text = PostText::parse("a".repeat(281).as_str());
+        assert!(text.is_ok());
+        if let Ok(text) = text {
+            assert_eq!(create_operation_for(&text), "CreateNoteTweet");
+        }
+    }
+
+    #[test]
+    fn quote_attachment_variable_is_shared_between_short_and_long_posts() {
+        let quote = PostId::parse("https://x.com/alice/status/1349129669258448897");
+        let short = PostText::parse("short quote");
+        let long = PostText::parse("a".repeat(281).as_str());
+        assert!(quote.is_ok());
+        assert!(short.is_ok());
+        assert!(long.is_ok());
+        if let (Ok(quote), Ok(short), Ok(long)) = (quote, short, long) {
+            let short_vars = create_variables_for(&short, None, Some(&quote), &[]);
+            let long_vars = create_variables_for(&long, None, Some(&quote), &[]);
+            assert_eq!(create_operation_for(&short), "CreateTweet");
+            assert_eq!(create_operation_for(&long), "CreateNoteTweet");
+            assert_eq!(
+                short_vars.get("attachment_url"),
+                long_vars.get("attachment_url")
+            );
+            assert_eq!(
+                long_vars
+                    .get("attachment_url")
+                    .and_then(|value| value.as_str()),
+                Some("https://x.com/i/status/1349129669258448897")
+            );
         }
     }
 }

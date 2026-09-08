@@ -225,7 +225,8 @@ impl Http {
             GraphQlMethod::Get => "GET",
             GraphQlMethod::Post => "POST",
         };
-        let headers = self.headers_for(method, &path).await?;
+        let transaction_path = format!("/i/api/graphql/{}", op.name);
+        let headers = self.headers_for(method, &transaction_path).await?;
         let request = match op.method {
             GraphQlMethod::Get => {
                 let params = [
@@ -235,11 +236,16 @@ impl Http {
                 self.client.get(url).query(&params)
             }
             GraphQlMethod::Post => {
-                let body = json!({
+                let mut body = json!({
                     "queryId": op.query_id,
                     "variables": variables,
                     "features": op.features,
                 });
+                if let (Some(object), Some(field_toggles)) =
+                    (body.as_object_mut(), op.field_toggles.as_ref())
+                {
+                    object.insert("fieldToggles".to_string(), field_toggles.clone());
+                }
                 self.client.post(url).json(&body)
             }
         };
@@ -325,10 +331,11 @@ fn init_tid() -> Result<ClientTransaction, Error> {
 }
 
 fn session_headers(session: &SessionCookies) -> Result<HeaderMap, Error> {
-    let cookie = format!("auth_token={}; ct0={}", session.auth_token(), session.ct0());
+    let fallback_cookie = format!("auth_token={}; ct0={}", session.auth_token(), session.ct0());
+    let cookie = session.cookie_header().unwrap_or(&fallback_cookie);
     let mut headers = HeaderMap::new();
     insert_static(&mut headers, "authorization", WEB_BEARER)?;
-    insert_owned(&mut headers, "cookie", &cookie)?;
+    insert_owned(&mut headers, "cookie", cookie)?;
     insert_owned(&mut headers, "x-csrf-token", session.ct0())?;
     insert_static(&mut headers, "origin", ORIGIN)?;
     insert_static(&mut headers, "referer", "https://x.com/")?;
@@ -366,7 +373,7 @@ async fn read_json(response: wreq::Response) -> Result<Value, Error> {
             body: body_preview(&body, 800),
         });
     }
-    Ok(serde_json::from_str(&body)?)
+    parse_json_body(&body)
 }
 
 async fn read_json_allow_empty(response: wreq::Response) -> Result<Value, Error> {
@@ -381,5 +388,14 @@ async fn read_json_allow_empty(response: wreq::Response) -> Result<Value, Error>
     if body.trim().is_empty() {
         return Ok(json!({}));
     }
-    Ok(serde_json::from_str(&body)?)
+    parse_json_body(&body)
+}
+
+fn parse_json_body(body: &str) -> Result<Value, Error> {
+    let value: Value = serde_json::from_str(body)?;
+    if let Some(errors) = value.get("errors") {
+        let preview = body_preview(&errors.to_string(), 800);
+        return Err(Error::GraphQlErrors(preview));
+    }
+    Ok(value)
 }

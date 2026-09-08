@@ -18,7 +18,7 @@ This repository builds an unofficial `xurl` binary that talks to X through the l
 
 The hard boundary is simple:
 
-- User identity is `auth_token` + `ct0` from browser cookies.
+- User identity is browser cookies: `auth_token`, `ct0`, and for write reliability the full X/Twitter `Cookie` header when available.
 - The web Bearer token is public x.com client material, not a user secret.
 - The CLI binary name is `xurl`; the crate/repo spelling is `xurl-unofficial`.
 - Write paths may be wired but must not be live-regressed against a real personal account unless explicitly requested with concrete target/content.
@@ -48,7 +48,7 @@ Do not use it for the official `xurl` CLI that calls paid X API `/2` endpoints.
 ## Architecture
 
 - `src/auth.rs` — cookie file, env aliases, redacted debug, overwrite confirmation.
-- `src/browser.rs` — imports `auth_token` and `ct0` from Chrome via `pookie`.
+- `src/browser.rs` — imports `auth_token`, `ct0`, and the full X/Twitter Cookie header from Chrome via `pookie`.
 - `src/http.rs` — HTTP adapter, Chrome impersonation, web Bearer, cookies, transaction header, queryId refresh retry.
 - `src/catalog.rs` + `catalog.json` — bundled GraphQL operation metadata.
 - `src/bundle.rs` — live JS scraping for `operationName` → `queryId` refresh.
@@ -56,7 +56,7 @@ Do not use it for the official `xurl` CLI that calls paid X API `/2` endpoints.
 - `src/parse.rs` — traversal/parsing for tweets, users, DMs, cursors.
 - `src/search.rs` — official-ish search flags mapped to web search syntax.
 - `src/media.rs` — media type/category and upload constraints.
-- `src/types.rs` — boundary types and validation.
+- `src/types.rs` — boundary types, validation, and X weighted-length rules for long-post routing.
 - `src/main.rs` — CLI routing only.
 
 Keep IO in adapters. Keep parsing and validation pure where possible.
@@ -69,10 +69,10 @@ Keep IO in adapters. Keep parsing and validation pure where possible.
 2. If the file exists, prompt `Overwrite? [y/N]` before reading Keychain.
 3. Open `https://x.com` so the user can log in or confirm the browser session.
 4. Wait for Enter.
-5. Import only `auth_token` and `ct0` from Chrome.
+5. Import `auth_token`, `ct0`, and the full X/Twitter Cookie header from Chrome.
 6. Save `~/.xurl-unofficial/cookies.toml` mode 0600.
 
-If Chrome import fails, fall back to manual prompt. Values must never be echoed.
+If Chrome import fails, fall back to manual prompt. Manual auth remains beginner-friendly: prompt for `auth_token`, then `ct0`, then an optional full `Cookie` header that can be skipped with Enter. Values must never be echoed.
 
 macOS may ask for the login Keychain / Chrome Safe Storage. That is system ACL behavior. Tell users to choose **Always Allow** if they want future imports to be quiet. Do not type passwords or interact with 1Password/2FA for them.
 
@@ -82,12 +82,12 @@ Current layers:
 
 | Layer | Status | Notes |
 |---|---|---|
-| `auth_token` + `ct0` | implemented | session identity and CSRF |
+| `auth_token` + `ct0` | implemented | session identity and CSRF; enough for many reads |
+| full browser cookie header | implemented | preferred for writes; missing full cookies can trigger X code 226 |
 | web `WEB_BEARER` | implemented | public x.com client Bearer, not a user credential |
 | Chrome TLS/HTTP2 impersonation | implemented | `wreq` + `wreq_util::Emulation::Chrome149` |
 | `x-client-transaction-id` | best-effort | `x-client-transaction` parses live x.com/`ondemand.s` and generates per method/path |
 | `queryId` refresh | best-effort | on GraphQL 404, scrape live JS and retry once |
-| full browser cookie jar | not implemented | only `auth_token` + `ct0` are persisted |
 | browser-controlled requests | not implemented | no CDP fetch replay or Chrome network stack |
 
 `x-client-transaction-id` is not a static secret. It is generated per request from method + path + timestamp + page-derived animation key. If the parser fails because X changed the frontend, the current policy is to skip the header rather than fail every request.
@@ -117,6 +117,18 @@ When adding a GraphQL operation:
 5. Keep runtime refresh in memory only; do not write to `catalog.json` during command execution.
 
 If a live command 404s after refresh, treat it as a catalog/method/feature mismatch, not automatically as auth failure. X can change the HTTP method as well as `queryId`.
+
+## Long Posts / NoteTweets
+
+Text above 280 X weighted chars must route to `CreateNoteTweet`, not `CreateTweet` with extra variables. URLs count as 23 chars for routing. `CreateNoteTweet` has its own feature set and requires `fieldToggles`; reusing `CreateTweet` metadata causes server-side write rejections such as code 186 or generic create failures.
+
+Implementation invariants:
+
+1. `src/types.rs` owns weighted-length calculation.
+2. `src/client.rs` picks `CreateTweet` vs `CreateNoteTweet` before calling HTTP.
+3. `catalog.json` includes `CreateNoteTweet` with note-specific `features` and `fieldToggles`.
+4. `src/parse.rs` accepts both `data.create_tweet` and `data.notetweet_create` result paths.
+5. Tests for this path are pure unit/mock tests only. Do not live-post to validate it.
 
 ## Agent Runtime Support
 

@@ -2,6 +2,9 @@
 
 use crate::error::Error;
 
+const STANDARD_TWEET_MAX_WEIGHTED_LENGTH: usize = 280;
+const URL_WEIGHTED_LENGTH: usize = 23;
+
 /// X handle without a leading `@`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenName(String);
@@ -36,7 +39,8 @@ impl PostId {
     /// Parse a numeric id or a status URL.
     pub fn parse(raw: &str) -> Result<Self, Error> {
         let trimmed = raw.trim();
-        let candidate = status_id_from_url(trimmed).unwrap_or(trimmed);
+        let parsed = status_from_url(trimmed);
+        let candidate = parsed.as_ref().map(|status| status.id).unwrap_or(trimmed);
         if !is_valid_post_id(candidate) {
             return Err(Error::InvalidPostId);
         }
@@ -47,9 +51,33 @@ impl PostId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// URL suitable for GraphQL `attachment_url` when quote-posting.
+    pub fn attachment_url(&self) -> String {
+        format!("https://x.com/i/status/{}", self.0)
+    }
 }
 
-fn status_id_from_url(raw: &str) -> Option<&str> {
+struct ParsedStatus<'a> {
+    id: &'a str,
+}
+
+fn status_from_url(raw: &str) -> Option<ParsedStatus<'_>> {
+    let scheme_end = raw.find("://")?;
+    let after_scheme = raw.get((scheme_end + 3)..)?;
+    let mut parts = after_scheme.split('/');
+    let host = parts.next()?;
+    if !matches!(
+        host,
+        "x.com" | "twitter.com" | "www.x.com" | "www.twitter.com"
+    ) {
+        return None;
+    }
+    let handle = parts.next()?;
+    let marker = parts.next()?;
+    if marker != "status" || !is_valid_screen_name(handle) {
+        return None;
+    }
     let after_status = raw.split("/status/").nth(1)?;
     let id = after_status
         .split(|c: char| !c.is_ascii_digit())
@@ -58,7 +86,7 @@ fn status_id_from_url(raw: &str) -> Option<&str> {
     if id.is_empty() {
         None
     } else {
-        Some(id)
+        Some(ParsedStatus { id })
     }
 }
 
@@ -83,6 +111,41 @@ impl PostText {
     /// Borrow the text.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Whether Web CreateTweet must use the long-form NoteTweet payload.
+    pub fn requires_note_tweet(&self) -> bool {
+        weighted_tweet_length(&self.0) > STANDARD_TWEET_MAX_WEIGHTED_LENGTH
+    }
+}
+
+/// Approximate X's tweet length weighting: URLs count as t.co links.
+pub fn weighted_tweet_length(text: &str) -> usize {
+    let mut total = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, _ch)) = chars.next() {
+        if starts_url_at(text, index) {
+            total += URL_WEIGHTED_LENGTH;
+            consume_url_tail(&mut chars);
+        } else {
+            total += 1;
+        }
+    }
+    total
+}
+
+fn starts_url_at(text: &str, index: usize) -> bool {
+    text.get(index..)
+        .map(|tail| tail.starts_with("https://") || tail.starts_with("http://"))
+        .unwrap_or(false)
+}
+
+fn consume_url_tail(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) {
+    while let Some((_index, ch)) = chars.peek() {
+        if ch.is_whitespace() {
+            break;
+        }
+        let _ = chars.next();
     }
 }
 
@@ -170,7 +233,10 @@ pub fn parse_media_ids(raw: &[String]) -> Result<Vec<MediaId>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_media_ids, MediaId, PageSize, PostId, PostText, ScreenName, SearchQuery};
+    use super::{
+        parse_media_ids, weighted_tweet_length, MediaId, PageSize, PostId, PostText, ScreenName,
+        SearchQuery,
+    };
 
     #[test]
     fn screen_name_strips_at_and_rejects_empty() {
@@ -187,10 +253,12 @@ mod tests {
     #[test]
     fn post_id_extracts_from_url() {
         let url = "https://x.com/user/status/1234567890?s=20";
-        assert_eq!(
-            PostId::parse(url).ok().map(|id| id.as_str().to_string()),
-            Some("1234567890".to_string())
-        );
+        let parsed = PostId::parse(url);
+        assert!(parsed.is_ok());
+        if let Ok(id) = parsed {
+            assert_eq!(id.as_str(), "1234567890");
+            assert_eq!(id.attachment_url(), "https://x.com/i/status/1234567890");
+        }
         assert!(PostId::parse("abc").is_err());
     }
 
@@ -203,6 +271,31 @@ mod tests {
                 .map(|text| text.as_str().to_string()),
             Some("hi".to_string())
         );
+    }
+
+    #[test]
+    fn post_text_marks_longform() {
+        let short = PostText::parse("x".repeat(280).as_str());
+        assert!(short.is_ok());
+        if let Ok(short) = short {
+            assert!(!short.requires_note_tweet());
+        }
+        let long = PostText::parse("x".repeat(281).as_str());
+        assert!(long.is_ok());
+        if let Ok(long) = long {
+            assert!(long.requires_note_tweet());
+        }
+    }
+
+    #[test]
+    fn weighted_tweet_length_counts_urls_as_tco_links() {
+        let text = format!("{} https://example.com/{}", "b".repeat(250), "x".repeat(80));
+        assert_eq!(weighted_tweet_length(&text), 274);
+        let post = PostText::parse(&text);
+        assert!(post.is_ok());
+        if let Ok(post) = post {
+            assert!(!post.requires_note_tweet());
+        }
     }
 
     #[test]

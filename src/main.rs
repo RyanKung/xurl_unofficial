@@ -399,7 +399,18 @@ fn prompt_session() -> Result<SessionCookies, Error> {
     if ct0.is_empty() {
         return Err(Error::MissingAuth(AuthField::Ct0));
     }
-    SessionCookies::new(token, ct0)
+    writeln!(
+        io::stderr(),
+        "Optional for write reliability: paste the full Cookie header, or press Enter to skip."
+    )
+    .map_err(|source| Error::Io { path: None, source })?;
+    let cookie_header = prompt_line("cookie_header")?;
+    let cookie_header = if cookie_header.is_empty() {
+        None
+    } else {
+        Some(cookie_header)
+    };
+    SessionCookies::with_cookie_header(token, ct0, cookie_header)
 }
 
 fn prompt_line(label: &str) -> Result<String, Error> {

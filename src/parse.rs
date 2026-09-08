@@ -48,15 +48,39 @@ pub fn user_from_verify_credentials(data: &Value) -> Result<User, Error> {
     }
 }
 
-/// Read CreateTweet `data.create_tweet.tweet_results.result`.
-pub fn tweet_from_create_payload(data: &Value) -> Result<Tweet, Error> {
-    let result = data
+/// Read CreateTweet output.
+///
+/// X changes CreateTweet response wrappers more often than timeline payloads.
+/// Prefer the documented `data.create_tweet.tweet_results.result` shape, then
+/// fall back to the generic tweet walker so successful writes do not look like
+/// failures just because the envelope moved.
+pub fn tweet_from_create_payload(data: &Value, text: &str) -> Result<Tweet, Error> {
+    if let Some(tweet) = data
         .get("data")
         .and_then(|d| d.get("create_tweet"))
         .and_then(|c| c.get("tweet_results"))
         .and_then(|t| t.get("result"))
-        .ok_or_else(|| Error::TweetNotFound("create".to_string()))?;
-    tweet_from_result(result).ok_or_else(|| Error::TweetNotFound("create".to_string()))
+        .and_then(|result| tweet_from_create_result(result, text))
+    {
+        return Ok(tweet);
+    }
+    if let Some(tweet) = data
+        .get("data")
+        .and_then(|d| d.get("notetweet_create"))
+        .and_then(|c| c.get("tweet_results"))
+        .and_then(|t| t.get("result"))
+        .and_then(|result| tweet_from_create_result(result, text))
+    {
+        return Ok(tweet);
+    }
+    collect(
+        data,
+        |result| tweet_from_create_result(result, text),
+        |tweet| tweet.id.as_str(),
+    )
+    .into_iter()
+    .next()
+    .ok_or_else(|| Error::TweetNotFound(format!("create: {}", shape_summary(data))))
 }
 
 /// Find a tweet whose rest_id matches `post_id`.
@@ -160,13 +184,37 @@ fn tweet_from_result(result: &Value) -> Option<Tweet> {
     })
 }
 
-fn collect<T>(value: &Value, pick: fn(&Value) -> Option<T>, id: fn(&T) -> &str) -> Vec<T> {
+fn tweet_from_create_result(result: &Value, text_hint: &str) -> Option<Tweet> {
+    tweet_from_result(result).or_else(|| {
+        let core = result.get("tweet").or(Some(result));
+        let node = core?;
+        let id = string_field(node, "rest_id").or_else(|| {
+            node.get("legacy")
+                .and_then(|legacy| string_field(legacy, "id_str"))
+        })?;
+        Some(Tweet {
+            id,
+            text: text_hint.to_string(),
+            created_at: node
+                .get("legacy")
+                .and_then(|legacy| string_field(legacy, "created_at")),
+        })
+    })
+}
+
+fn collect<T, F>(value: &Value, pick: F, id: fn(&T) -> &str) -> Vec<T>
+where
+    F: Fn(&Value) -> Option<T>,
+{
     let mut out = Vec::new();
-    walk(value, &mut out, pick, id);
+    walk(value, &mut out, &pick, id);
     out
 }
 
-fn walk<T>(value: &Value, out: &mut Vec<T>, pick: fn(&Value) -> Option<T>, id: fn(&T) -> &str) {
+fn walk<T, F>(value: &Value, out: &mut Vec<T>, pick: &F, id: fn(&T) -> &str)
+where
+    F: Fn(&Value) -> Option<T>,
+{
     if let Some(item) = pick(value) {
         if out.iter().all(|existing| id(existing) != id(&item)) {
             out.push(item);
@@ -237,6 +285,38 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn shape_summary(value: &Value) -> String {
+    let mut paths = Vec::new();
+    collect_shape(value, "$", 0, &mut paths);
+    paths.join(",")
+}
+
+fn collect_shape(value: &Value, path: &str, depth: usize, paths: &mut Vec<String>) {
+    if depth >= 4 || paths.len() >= 32 {
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let next = format!("{path}.{key}");
+                paths.push(next.clone());
+                collect_shape(child, &next, depth + 1, paths);
+                if paths.len() >= 32 {
+                    return;
+                }
+            }
+        }
+        Value::Array(items) => {
+            if let Some(first) = items.first() {
+                let next = format!("{path}[]");
+                paths.push(next.clone());
+                collect_shape(first, &next, depth + 1, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -280,11 +360,72 @@ mod tests {
                 }
             }
         });
-        let tweet = tweet_from_create_payload(&payload);
+        let tweet = tweet_from_create_payload(&payload, "hello");
         assert!(tweet.is_ok());
         if let Ok(tweet) = tweet {
             assert_eq!(tweet.id, "42");
             assert_eq!(tweet.text, "hello");
+        }
+    }
+
+    #[test]
+    fn create_payload_falls_back_to_nested_tweet() {
+        let payload = json!({
+            "data": {
+                "create_tweet": {
+                    "tweet": {
+                        "rest_id": "43",
+                        "legacy": { "full_text": "nested", "created_at": "now" }
+                    }
+                }
+            }
+        });
+        let tweet = tweet_from_create_payload(&payload, "hello");
+        assert!(tweet.is_ok());
+        if let Ok(tweet) = tweet {
+            assert_eq!(tweet.id, "43");
+            assert_eq!(tweet.text, "nested");
+        }
+    }
+
+    #[test]
+    fn create_payload_reads_note_tweet_result() {
+        let payload = json!({
+            "data": {
+                "notetweet_create": {
+                    "tweet_results": {
+                        "result": {
+                            "rest_id": "44",
+                            "legacy": { "full_text": "long", "created_at": "now" }
+                        }
+                    }
+                }
+            }
+        });
+        let tweet = tweet_from_create_payload(&payload, "hello");
+        assert!(tweet.is_ok());
+        if let Ok(tweet) = tweet {
+            assert_eq!(tweet.id, "44");
+            assert_eq!(tweet.text, "long");
+        }
+    }
+
+    #[test]
+    fn create_payload_uses_text_hint_when_create_result_has_only_id() {
+        let payload = json!({
+            "data": {
+                "notetweet_create": {
+                    "tweet_results": {
+                        "result": { "rest_id": "45" }
+                    }
+                }
+            }
+        });
+        let tweet = tweet_from_create_payload(&payload, "fallback text");
+        assert!(tweet.is_ok());
+        if let Ok(tweet) = tweet {
+            assert_eq!(tweet.id, "45");
+            assert_eq!(tweet.text, "fallback text");
         }
     }
 

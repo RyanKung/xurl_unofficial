@@ -25,6 +25,12 @@ impl CookiesFile {
             .map(|home| Self(PathBuf::from(home).join(".xurl-unofficial/cookies.toml")))
     }
 
+    /// Legacy misspelled location used by early builds.
+    pub fn legacy_default_path() -> Option<Self> {
+        env::var_os("HOME")
+            .map(|home| Self(PathBuf::from(home).join(".xurl-unoffical/cookies.toml")))
+    }
+
     /// Borrow the path.
     pub fn as_path(&self) -> &Path {
         &self.0
@@ -49,17 +55,27 @@ pub fn confirms_overwrite(answer: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
-/// Cookie pair required by X web GraphQL.
+/// Cookie capability required by X web GraphQL.
 ///
 /// Duplication is not `Clone`: a session is a capability, not a value.
 pub struct SessionCookies {
     auth_token: String,
     ct0: String,
+    cookie_header: Option<String>,
 }
 
 impl SessionCookies {
     /// Construct from already-loaded cookie values.
     pub fn new(auth_token: String, ct0: String) -> Result<Self, Error> {
+        Self::with_cookie_header(auth_token, ct0, None)
+    }
+
+    /// Construct from already-loaded cookie values and an optional full Cookie header.
+    pub fn with_cookie_header(
+        auth_token: String,
+        ct0: String,
+        cookie_header: Option<String>,
+    ) -> Result<Self, Error> {
         if auth_token.trim().is_empty() {
             return Err(Error::MissingAuth(AuthField::AuthToken));
         }
@@ -69,6 +85,7 @@ impl SessionCookies {
         Ok(Self {
             auth_token: auth_token.trim().to_string(),
             ct0: ct0.trim().to_string(),
+            cookie_header: cookie_header.and_then(normalize_cookie_header),
         })
     }
 
@@ -80,7 +97,7 @@ impl SessionCookies {
         if let Some(from_env) = load_env() {
             return from_env;
         }
-        match CookiesFile::default_path() {
+        match default_read_path() {
             Some(default) if default.as_path().exists() => load_file(default.as_path()),
             _ => Err(Error::MissingAuth(AuthField::AuthToken)),
         }
@@ -96,19 +113,21 @@ impl SessionCookies {
             return AuthStatus {
                 auth_token: env_token,
                 ct0: env_ct0,
+                cookie_header: env_present(&["TWITTER_COOKIE_HEADER", "X_COOKIE_HEADER"]),
                 source: AuthSource::Env,
                 path: None,
             };
         }
         let file = match explicit {
             Some(file) => Some(file.clone()),
-            None => CookiesFile::default_path(),
+            None => default_read_path(),
         };
         match file {
             Some(file) => status_from_file(file),
             None => AuthStatus {
                 auth_token: false,
                 ct0: false,
+                cookie_header: false,
                 source: AuthSource::None,
                 path: None,
             },
@@ -125,6 +144,16 @@ impl SessionCookies {
         &self.ct0
     }
 
+    /// Borrow the full browser Cookie header, when available.
+    pub fn cookie_header(&self) -> Option<&str> {
+        self.cookie_header.as_deref()
+    }
+
+    /// Whether a full browser Cookie header is configured.
+    pub fn has_full_cookie_header(&self) -> bool {
+        self.cookie_header.is_some()
+    }
+
     /// Write cookies to toml. Values are never logged.
     pub fn save(&self, file: &CookiesFile) -> Result<(), Error> {
         let path = file.as_path();
@@ -137,6 +166,7 @@ impl SessionCookies {
         let body = toml::to_string_pretty(&CookiesOut {
             auth_token: &self.auth_token,
             ct0: &self.ct0,
+            cookie_header: self.cookie_header.as_deref(),
         })?;
         fs::write(path, body).map_err(|source| Error::Io {
             path: Some(path.to_path_buf()),
@@ -151,6 +181,7 @@ impl fmt::Debug for SessionCookies {
         f.debug_struct("SessionCookies")
             .field("auth_token", &"<redacted>")
             .field("ct0", &"<redacted>")
+            .field("cookie_header", &self.has_full_cookie_header())
             .finish()
     }
 }
@@ -173,6 +204,8 @@ pub struct AuthStatus {
     pub auth_token: bool,
     /// True if ct0 is configured.
     pub ct0: bool,
+    /// True if a full browser Cookie header is configured.
+    pub cookie_header: bool,
     /// Env, file, or neither.
     pub source: AuthSource,
     /// Cookies file path when that source applies.
@@ -195,10 +228,17 @@ impl fmt::Display for AuthStatus {
                     "Session cookies are configured from environment variables."
                 ),
                 AuthSource::File => match &self.path {
-                    Some(path) => {
-                        write!(f, "Session cookies are configured from {}.", path.display())
-                    }
-                    None => write!(f, "Session cookies are configured from a cookies file."),
+                    Some(path) => write!(
+                        f,
+                        "Session cookies are configured from {}. Full cookie header: {}.",
+                        path.display(),
+                        present_label(self.cookie_header)
+                    ),
+                    None => write!(
+                        f,
+                        "Session cookies are configured from a cookies file. Full cookie header: {}.",
+                        present_label(self.cookie_header)
+                    ),
                 },
                 AuthSource::None => write!(f, "Session cookies are configured."),
             }
@@ -206,6 +246,11 @@ impl fmt::Display for AuthStatus {
             writeln!(f, "Session cookies are not fully configured.")?;
             writeln!(f, "  auth_token: {}", present_label(self.auth_token))?;
             writeln!(f, "  ct0: {}", present_label(self.ct0))?;
+            writeln!(
+                f,
+                "  full cookie header: {}",
+                present_label(self.cookie_header)
+            )?;
             match &self.path {
                 Some(path) if self.source == AuthSource::File => {
                     write!(f, "  cookies file: {}", path.display())
@@ -222,6 +267,17 @@ fn present_label(present: bool) -> &'static str {
         "set"
     } else {
         "missing"
+    }
+}
+
+fn default_read_path() -> Option<CookiesFile> {
+    let current = CookiesFile::default_path()?;
+    if current.exists() {
+        return Some(current);
+    }
+    match CookiesFile::legacy_default_path() {
+        Some(legacy) if legacy.exists() => Some(legacy),
+        _ => Some(current),
     }
 }
 
@@ -277,12 +333,16 @@ impl fmt::Display for AuthSaved {
 struct CookiesOut<'a> {
     auth_token: &'a str,
     ct0: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cookie_header: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
 struct CookiesToml {
     auth_token: Option<String>,
     ct0: Option<String>,
+    cookie_header: Option<String>,
+    extra_cookies: Option<String>,
 }
 
 #[cfg(unix)]
@@ -301,20 +361,21 @@ fn set_private(_path: &Path) -> Result<(), Error> {
 
 fn status_from_file(file: CookiesFile) -> AuthStatus {
     let exists = file.as_path().exists();
-    let (auth_token, ct0) = if exists {
+    let (auth_token, ct0, cookie_header) = if exists {
         file_fields_present(file.as_path()).unwrap_or_default()
     } else {
-        (false, false)
+        (false, false, false)
     };
     AuthStatus {
         auth_token,
         ct0,
+        cookie_header,
         source: AuthSource::File,
         path: Some(file.as_path().to_path_buf()),
     }
 }
 
-fn file_fields_present(path: &Path) -> Result<(bool, bool), Error> {
+fn file_fields_present(path: &Path) -> Result<(bool, bool, bool), Error> {
     let raw = fs::read_to_string(path).map_err(|source| Error::Io {
         path: Some(path.to_path_buf()),
         source,
@@ -326,6 +387,8 @@ fn file_fields_present(path: &Path) -> Result<(bool, bool), Error> {
     Ok((
         field_present(parsed.auth_token.as_deref()),
         field_present(parsed.ct0.as_deref()),
+        field_present(parsed.cookie_header.as_deref())
+            || field_present(parsed.extra_cookies.as_deref()),
     ))
 }
 
@@ -350,12 +413,30 @@ fn first_env(keys: &[&str]) -> Option<String> {
     })
 }
 
+fn normalize_cookie_header(raw: String) -> Option<String> {
+    let parts: Vec<&str> = raw
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && part.contains('='))
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
 fn load_env() -> Option<Result<SessionCookies, Error>> {
     let token = first_env(&["TWITTER_AUTH_TOKEN", "TWITTER_COOKIE_AUTH_TOKEN"]);
     let ct0 = first_env(&["TWITTER_CT0", "TWITTER_COOKIE_CT0"]);
+    let cookie_header = first_env(&["TWITTER_COOKIE_HEADER", "X_COOKIE_HEADER"]);
     match (token, ct0) {
         (None, None) => None,
-        (Some(token), Some(ct0)) => Some(SessionCookies::new(token, ct0)),
+        (Some(token), Some(ct0)) => Some(SessionCookies::with_cookie_header(
+            token,
+            ct0,
+            cookie_header,
+        )),
         (None, Some(_)) => Some(Err(Error::MissingAuth(AuthField::AuthToken))),
         (Some(_), None) => Some(Err(Error::MissingAuth(AuthField::Ct0))),
     }
@@ -374,7 +455,8 @@ fn load_file(path: &Path) -> Result<SessionCookies, Error> {
         .auth_token
         .ok_or(Error::MissingAuth(AuthField::AuthToken))?;
     let ct0 = parsed.ct0.ok_or(Error::MissingAuth(AuthField::Ct0))?;
-    SessionCookies::new(token, ct0)
+    let cookie_header = parsed.cookie_header.or(parsed.extra_cookies);
+    SessionCookies::with_cookie_header(token, ct0, cookie_header)
 }
 
 #[cfg(test)]
@@ -426,6 +508,7 @@ mod tests {
             if let Ok(loaded) = loaded {
                 assert_eq!(loaded.auth_token, "aaa-token");
                 assert_eq!(loaded.ct0, "bbb-ct0");
+                assert!(!loaded.has_full_cookie_header());
             }
         }
         let _ = fs::remove_file(&path);
@@ -442,9 +525,46 @@ mod tests {
             assert!(session.save(&file).is_ok());
             let status = SessionCookies::status(Some(&file));
             assert!(status.is_ready());
+            assert!(!status.cookie_header);
             assert_eq!(status.source, AuthSource::File);
             let rendered = status.to_string();
             assert!(rendered.contains("configured"));
+            assert!(!rendered.contains("aaa-token"));
+            assert!(!rendered.contains("bbb-ct0"));
+        }
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn full_cookie_header_round_trip_is_redacted_in_status() {
+        let path = std::env::temp_dir().join(format!(
+            "xurl-cookies-{}-full-header.toml",
+            std::process::id()
+        ));
+        let header = " guest_id=v1%3A123 ; auth_token=aaa-token; ct0=bbb-ct0; twid=u%3D1 ";
+        let session = SessionCookies::with_cookie_header(
+            "aaa-token".to_string(),
+            "bbb-ct0".to_string(),
+            Some(header.to_string()),
+        );
+        assert!(session.is_ok());
+        if let Ok(session) = session {
+            assert_eq!(
+                session.cookie_header(),
+                Some("guest_id=v1%3A123; auth_token=aaa-token; ct0=bbb-ct0; twid=u%3D1")
+            );
+            let file = CookiesFile::new(path.clone());
+            assert!(session.save(&file).is_ok());
+            let loaded = SessionCookies::load(Some(&file));
+            assert!(loaded.is_ok());
+            if let Ok(loaded) = loaded {
+                assert!(loaded.has_full_cookie_header());
+            }
+            let status = SessionCookies::status(Some(&file));
+            assert!(status.cookie_header);
+            let rendered = status.to_string();
+            assert!(rendered.contains("Full cookie header: set"));
+            assert!(!rendered.contains("guest_id"));
             assert!(!rendered.contains("aaa-token"));
             assert!(!rendered.contains("bbb-ct0"));
         }

@@ -33,6 +33,8 @@ pub struct Operation {
     pub method: GraphQlMethod,
     /// Feature flags required by the current web client.
     pub features: Value,
+    /// Optional field toggles required by some operations.
+    pub field_toggles: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -41,6 +43,8 @@ struct RawOp {
     query_id: String,
     method: GraphQlMethod,
     features: Value,
+    #[serde(rename = "fieldToggles")]
+    field_toggles: Option<Value>,
 }
 
 /// Parsed `catalog.json`.
@@ -63,6 +67,7 @@ impl Catalog {
                     query_id: raw_op.query_id,
                     method: raw_op.method,
                     features: raw_op.features,
+                    field_toggles: raw_op.field_toggles,
                 },
             );
         }
@@ -103,6 +108,7 @@ mod tests {
             assert!(catalog.get("UserByScreenName").is_ok());
             assert!(catalog.get("Viewer").is_ok());
             assert!(catalog.get("CreateTweet").is_ok());
+            assert!(catalog.get("CreateNoteTweet").is_ok());
             assert!(catalog.get("FavoriteTweet").is_ok());
             assert!(catalog.get("UnfavoriteTweet").is_ok());
             assert!(catalog.get("CreateRetweet").is_ok());
@@ -118,6 +124,19 @@ mod tests {
             assert!(catalog.get("Likes").is_ok());
             assert!(catalog.get("TweetDetail").is_ok());
             assert!(catalog.get("DeleteTweet").is_ok());
+        }
+    }
+
+    #[test]
+    fn note_tweet_catalog_has_field_toggles() {
+        let catalog = Catalog::bundled();
+        assert!(catalog.is_ok());
+        if let Ok(catalog) = catalog {
+            let op = catalog.get("CreateNoteTweet");
+            assert!(op.is_ok());
+            if let Ok(op) = op {
+                assert!(op.field_toggles.is_some());
+            }
         }
     }
 

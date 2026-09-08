@@ -63,6 +63,9 @@ pub enum Error {
         /// Truncated response body.
         body: String,
     },
+    /// X returned GraphQL errors in a success-status response.
+    #[error("graphql errors: {0}")]
+    GraphQlErrors(String),
     /// Response body was not JSON.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),

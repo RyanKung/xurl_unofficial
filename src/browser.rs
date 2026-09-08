@@ -1,4 +1,4 @@
-//! Import `auth_token` and `ct0` from the local Chrome profile.
+//! Import a full X/Twitter browser Cookie header from the local Chrome profile.
 
 use pookie::enums::Cookie;
 
@@ -12,7 +12,8 @@ pub fn session_from_chrome() -> Result<SessionCookies, Error> {
     let token =
         cookie_value(&cookies, "auth_token").ok_or(Error::MissingAuth(AuthField::AuthToken))?;
     let ct0 = cookie_value(&cookies, "ct0").ok_or(Error::MissingAuth(AuthField::Ct0))?;
-    SessionCookies::new(token, ct0)
+    let cookie_header = full_cookie_header(&cookies);
+    SessionCookies::with_cookie_header(token, ct0, cookie_header)
 }
 
 fn cookie_value(cookies: &[Cookie], name: &str) -> Option<String> {
@@ -20,6 +21,22 @@ fn cookie_value(cookies: &[Cookie], name: &str) -> Option<String> {
         .iter()
         .find(|cookie| is_x_session_cookie(cookie, name))
         .map(|cookie| cookie.value.clone())
+}
+
+fn full_cookie_header(cookies: &[Cookie]) -> Option<String> {
+    let mut pairs: Vec<String> = cookies
+        .iter()
+        .filter(|cookie| host_is_x(&cookie.domain))
+        .filter(|cookie| !cookie.name.trim().is_empty() && !cookie.value.trim().is_empty())
+        .map(|cookie| format!("{}={}", cookie.name.trim(), cookie.value.trim()))
+        .collect();
+    pairs.sort();
+    pairs.dedup();
+    if pairs.is_empty() {
+        None
+    } else {
+        Some(pairs.join("; "))
+    }
 }
 
 fn is_x_session_cookie(cookie: &Cookie, name: &str) -> bool {
