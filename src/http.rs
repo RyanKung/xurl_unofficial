@@ -225,8 +225,7 @@ impl Http {
             GraphQlMethod::Get => "GET",
             GraphQlMethod::Post => "POST",
         };
-        let transaction_path = format!("/i/api/graphql/{}", op.name);
-        let headers = self.headers_for(method, &transaction_path).await?;
+        let headers = self.headers_for(method, &path).await?;
         let request = match op.method {
             GraphQlMethod::Get => {
                 let params = [

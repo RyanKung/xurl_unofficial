@@ -73,13 +73,15 @@ fn status_from_url(raw: &str) -> Option<ParsedStatus<'_>> {
     ) {
         return None;
     }
-    let handle = parts.next()?;
-    let marker = parts.next()?;
-    if marker != "status" || !is_valid_screen_name(handle) {
-        return None;
-    }
-    let after_status = raw.split("/status/").nth(1)?;
-    let id = after_status
+    let id = after_scheme
+        .split('/')
+        .skip(1)
+        .collect::<Vec<&str>>()
+        .windows(2)
+        .find_map(|window| match window {
+            ["status", id] => Some(*id),
+            _ => None,
+        })?
         .split(|c: char| !c.is_ascii_digit())
         .next()
         .unwrap_or("");
@@ -119,19 +121,35 @@ impl PostText {
     }
 }
 
-/// Approximate X's tweet length weighting: URLs count as t.co links.
+/// X weighted length: URLs count as t.co links, CJK and emoji weigh two.
 pub fn weighted_tweet_length(text: &str) -> usize {
     let mut total = 0;
     let mut chars = text.char_indices().peekable();
-    while let Some((index, _ch)) = chars.next() {
+    while let Some((index, ch)) = chars.next() {
         if starts_url_at(text, index) {
             total += URL_WEIGHTED_LENGTH;
             consume_url_tail(&mut chars);
         } else {
-            total += 1;
+            total += char_weight(ch);
         }
     }
     total
+}
+
+fn char_weight(ch: char) -> usize {
+    let codepoint = ch as u32;
+    if is_single_weight_codepoint(codepoint) {
+        1
+    } else {
+        2
+    }
+}
+
+fn is_single_weight_codepoint(codepoint: u32) -> bool {
+    matches!(
+        codepoint,
+        0..=4351 | 8192..=8205 | 8208..=8223 | 8242..=8247
+    )
 }
 
 fn starts_url_at(text: &str, index: usize) -> bool {
@@ -259,6 +277,12 @@ mod tests {
             assert_eq!(id.as_str(), "1234567890");
             assert_eq!(id.attachment_url(), "https://x.com/i/status/1234567890");
         }
+        assert_eq!(
+            PostId::parse("https://x.com/i/web/status/9876543210")
+                .ok()
+                .map(|id| id.as_str().to_string()),
+            Some("9876543210".to_string())
+        );
         assert!(PostId::parse("abc").is_err());
     }
 
@@ -295,6 +319,16 @@ mod tests {
         assert!(post.is_ok());
         if let Ok(post) = post {
             assert!(!post.requires_note_tweet());
+        }
+    }
+
+    #[test]
+    fn weighted_tweet_length_counts_cjk_and_emoji_as_double_weight() {
+        assert_eq!(weighted_tweet_length("a界🚀"), 5);
+        let text = PostText::parse("界".repeat(141).as_str());
+        assert!(text.is_ok());
+        if let Ok(text) = text {
+            assert!(text.requires_note_tweet());
         }
     }
 

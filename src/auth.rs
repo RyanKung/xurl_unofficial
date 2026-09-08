@@ -76,16 +76,19 @@ impl SessionCookies {
         ct0: String,
         cookie_header: Option<String>,
     ) -> Result<Self, Error> {
-        if auth_token.trim().is_empty() {
+        let auth_token = auth_token.trim();
+        let ct0 = ct0.trim();
+        if auth_token.is_empty() {
             return Err(Error::MissingAuth(AuthField::AuthToken));
         }
-        if ct0.trim().is_empty() {
+        if ct0.is_empty() {
             return Err(Error::MissingAuth(AuthField::Ct0));
         }
         Ok(Self {
-            auth_token: auth_token.trim().to_string(),
-            ct0: ct0.trim().to_string(),
-            cookie_header: cookie_header.and_then(normalize_cookie_header),
+            auth_token: auth_token.to_string(),
+            ct0: ct0.to_string(),
+            cookie_header: cookie_header
+                .and_then(|header| normalize_cookie_header(header, auth_token, ct0)),
         })
     }
 
@@ -413,12 +416,30 @@ fn first_env(keys: &[&str]) -> Option<String> {
     })
 }
 
-fn normalize_cookie_header(raw: String) -> Option<String> {
-    let parts: Vec<&str> = raw
+fn normalize_cookie_header(raw: String, auth_token: &str, ct0: &str) -> Option<String> {
+    let raw = raw.trim();
+    let without_prefix = raw
+        .strip_prefix("Cookie:")
+        .or_else(|| raw.strip_prefix("cookie:"))
+        .unwrap_or(raw);
+    let mut parts: Vec<String> = without_prefix
         .split(';')
         .map(str::trim)
-        .filter(|part| !part.is_empty() && part.contains('='))
+        .filter_map(|part| {
+            let (name, value) = part.split_once('=')?;
+            let name = name.trim();
+            let value = value.trim();
+            if name.is_empty() || value.is_empty() {
+                return None;
+            }
+            match name {
+                "auth_token" | "ct0" => None,
+                _ => Some(format!("{name}={value}")),
+            }
+        })
         .collect();
+    parts.push(format!("auth_token={auth_token}"));
+    parts.push(format!("ct0={ct0}"));
     if parts.is_empty() {
         None
     } else {
@@ -551,7 +572,7 @@ mod tests {
         if let Ok(session) = session {
             assert_eq!(
                 session.cookie_header(),
-                Some("guest_id=v1%3A123; auth_token=aaa-token; ct0=bbb-ct0; twid=u%3D1")
+                Some("guest_id=v1%3A123; twid=u%3D1; auth_token=aaa-token; ct0=bbb-ct0")
             );
             let file = CookiesFile::new(path.clone());
             assert!(session.save(&file).is_ok());
@@ -569,5 +590,39 @@ mod tests {
             assert!(!rendered.contains("bbb-ct0"));
         }
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn full_cookie_header_strips_prefix_and_uses_canonical_auth_pair() {
+        let header = "Cookie: guest_id=v1%3A123; auth_token=stale; ct0=stale; twid=u%3D1";
+        let session = SessionCookies::with_cookie_header(
+            "aaa-token".to_string(),
+            "bbb-ct0".to_string(),
+            Some(header.to_string()),
+        );
+        assert!(session.is_ok());
+        if let Ok(session) = session {
+            assert_eq!(
+                session.cookie_header(),
+                Some("guest_id=v1%3A123; twid=u%3D1; auth_token=aaa-token; ct0=bbb-ct0")
+            );
+        }
+    }
+
+    #[test]
+    fn full_cookie_header_adds_required_auth_pair_when_missing() {
+        let header = "guest_id=v1%3A123; twid=u%3D1";
+        let session = SessionCookies::with_cookie_header(
+            "aaa-token".to_string(),
+            "bbb-ct0".to_string(),
+            Some(header.to_string()),
+        );
+        assert!(session.is_ok());
+        if let Ok(session) = session {
+            assert_eq!(
+                session.cookie_header(),
+                Some("guest_id=v1%3A123; twid=u%3D1; auth_token=aaa-token; ct0=bbb-ct0")
+            );
+        }
     }
 }
